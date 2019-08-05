@@ -1,0 +1,153 @@
+Index: api/go1.11.txt
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- api/go1.11.txt	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ api/go1.11.txt	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -557,3 +557,8 @@
+ pkg syscall (windows-amd64), type Pointer *struct
+ pkg syscall, const ImplementsGetwd = true
+ pkg text/template/parse, type PipeNode struct, IsAssign bool
++pkg runtime, func GetGParam(unsafe.Pointer) unsafe.Pointer
++pkg runtime, func GetGoroutine() unsafe.Pointer
++pkg runtime, func ParkUnsafe(unsafe.Pointer)
++pkg runtime, func SetGParam(unsafe.Pointer, unsafe.Pointer)
++pkg runtime, func UnparkUnsafe(unsafe.Pointer)
+Index: src/runtime/proc.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/runtime/proc.go	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ src/runtime/proc.go	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -274,6 +274,35 @@
+ 	mcall(goschedguarded_m)
+ }
+ 
++func ParkUnsafe(gp unsafe.Pointer) {
++	g := (*g)(gp)
++	if g.new_unparkState == 2 {
++		g.new_unparkState = 0
++		return
++	}
++	gopark(parkUnsafeFastPath, nil, waitReasonZero, traceEvNone, 3)
++}
++
++func parkUnsafeFastPath(gp *g, lock unsafe.Pointer) bool {
++	if atomic.Cas(&gp.new_unparkState, 0, 1) {
++		return true
++	} else {
++		gp.new_unparkState = 0
++		return false
++	}
++}
++
++func UnparkUnsafe(gp unsafe.Pointer) {
++	g := (*g)(gp)
++	if g.new_unparkState == 0 {
++		if atomic.Cas(&g.new_unparkState, 0, 2) {
++			return // unparked
++		}
++	}
++	g.new_unparkState = 0
++	goready(g, 3)
++}
++
+ // Puts the current goroutine into a waiting state and calls unlockf.
+ // If unlockf returns false, the goroutine is resumed.
+ // unlockf must not access this G's stack, as it may be moved between
+Index: src/runtime/runtime2.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/runtime/runtime2.go	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ src/runtime/runtime2.go	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -388,6 +388,9 @@
+ 	timer          *timer         // cached timer for time.Sleep
+ 	selectDone     uint32         // are we participating in a select and did someone win the race?
+ 
++	new_param       unsafe.Pointer // TODO use param instead
++	new_unparkState uint32         // 0 -- undefined, 1 -- parked, 2 -- unparked
++
+ 	// Per-G GC state
+ 
+ 	// gcAssistBytes is this G's GC assist credit in terms of
+@@ -400,6 +403,14 @@
+ 	gcAssistBytes int64
+ }
+ 
++func SetGParam(gp unsafe.Pointer, param unsafe.Pointer) {
++	((*g)(gp)).new_param = param
++}
++
++func GetGParam(gp unsafe.Pointer) unsafe.Pointer {
++	return ((*g)(gp)).new_param
++}
++
+ type m struct {
+ 	g0      *g     // goroutine with scheduling stack
+ 	morebuf gobuf  // gobuf arg to morestack
+Index: src/runtime/sizeof_test.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/runtime/sizeof_test.go	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ src/runtime/sizeof_test.go	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -23,7 +23,7 @@
+ 		_32bit uintptr     // size on 32bit platforms
+ 		_64bit uintptr     // size on 64bit platforms
+ 	}{
+-		{runtime.G{}, 216, 376}, // g, but exported for testing
++		{runtime.G{}, 228, 392}, // g, but exported for testing
+ 	}
+ 
+ 	for _, tt := range tests {
+Index: src/runtime/stack.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/runtime/stack.go	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ src/runtime/stack.go	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -583,13 +583,13 @@
+ 			pp := (*uintptr)(add(scanp, (i+j)*sys.PtrSize))
+ 		retry:
+ 			p := *pp
+-			if f.valid() && 0 < p && p < minLegalPointer && debug.invalidptr != 0 {
+-				// Looks like a junk value in a pointer slot.
+-				// Live analysis wrong?
+-				getg().m.traceback = 2
+-				print("runtime: bad pointer in frame ", funcname(f), " at ", pp, ": ", hex(p), "\n")
+-				throw("invalid pointer found on stack")
+-			}
++			//if f.valid() && 0 < p && p < minLegalPointer && debug.invalidptr != 0 {
++			//	// Looks like a junk value in a pointer slot.
++			//	// Live analysis wrong?
++			//	getg().m.traceback = 2
++			//	print("runtime: bad pointer in frame ", funcname(f), " at ", pp, ": ", hex(p), "\n")
++			//	throw("invalid pointer found on stack")
++			//}
+ 			if minp <= p && p < maxp {
+ 				if stackDebug >= 3 {
+ 					print("adjust ptr ", hex(p), " ", funcname(f), "\n")
+Index: src/runtime/stubs.go
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- src/runtime/stubs.go	(revision e8a95aeb75536496432bcace1fb2bbfa449bf0fa)
++++ src/runtime/stubs.go	(revision 594194386855f0056cb20061deebb9c8ed9f7f95)
+@@ -17,6 +17,10 @@
+ // that fetch the g directly (from TLS or from the dedicated register).
+ func getg() *g
+ 
++func GetGoroutine() unsafe.Pointer {
++	return (unsafe.Pointer)(getg())
++}
++
+ // mcall switches from the g to the g0 stack and invokes fn(g),
+ // where g is the goroutine that made the call.
+ // mcall saves g's current PC/SP in g->sched so that it can be restored later.

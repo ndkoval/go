@@ -1,0 +1,135 @@
+diff --git a/api/go1.11.txt b/api/go1.11.txt
+index 863e1f1625..09641421a1 100644
+--- a/api/go1.11.txt
++++ b/api/go1.11.txt
+@@ -557,3 +557,8 @@ pkg syscall (windows-amd64), type CertTrustListInfo struct
+ pkg syscall (windows-amd64), type Pointer *struct
+ pkg syscall, const ImplementsGetwd = true
+ pkg text/template/parse, type PipeNode struct, IsAssign bool
++pkg runtime, func GetGParam(unsafe.Pointer) unsafe.Pointer
++pkg runtime, func GetGoroutine() unsafe.Pointer
++pkg runtime, func ParkUnsafe(unsafe.Pointer)
++pkg runtime, func SetGParam(unsafe.Pointer, unsafe.Pointer)
++pkg runtime, func UnparkUnsafe(unsafe.Pointer)
+diff --git a/src/runtime/proc.go b/src/runtime/proc.go
+index f82014eb92..48c26c5ce3 100644
+--- a/src/runtime/proc.go
++++ b/src/runtime/proc.go
+@@ -274,6 +274,35 @@ func goschedguarded() {
+ 	mcall(goschedguarded_m)
+ }
+ 
++func ParkUnsafe(gp unsafe.Pointer) {
++	g := (*g)(gp)
++	if g.new_unparkState == 2 {
++		g.new_unparkState = 0
++		return
++	}
++	gopark(parkUnsafeFastPath, nil, waitReasonZero, traceEvNone, 3)
++}
++
++func parkUnsafeFastPath(gp *g, lock unsafe.Pointer) bool {
++	if atomic.Cas(&gp.new_unparkState, 0, 1) {
++		return true
++	} else {
++		gp.new_unparkState = 0
++		return false
++	}
++}
++
++func UnparkUnsafe(gp unsafe.Pointer) {
++	g := (*g)(gp)
++	if g.new_unparkState == 0 {
++		if atomic.Cas(&g.new_unparkState, 0, 2) {
++			return // unparked
++		}
++	}
++	g.new_unparkState = 0
++	goready(g, 3)
++}
++
+ // Puts the current goroutine into a waiting state and calls unlockf.
+ // If unlockf returns false, the goroutine is resumed.
+ // unlockf must not access this G's stack, as it may be moved between
+diff --git a/src/runtime/runtime2.go b/src/runtime/runtime2.go
+index ad47d1275e..20fb3ec273 100644
+--- a/src/runtime/runtime2.go
++++ b/src/runtime/runtime2.go
+@@ -388,6 +388,9 @@ type g struct {
+ 	timer          *timer         // cached timer for time.Sleep
+ 	selectDone     uint32         // are we participating in a select and did someone win the race?
+ 
++	new_param       unsafe.Pointer // TODO use param instead
++	new_unparkState uint32         // 0 -- undefined, 1 -- parked, 2 -- unparked
++
+ 	// Per-G GC state
+ 
+ 	// gcAssistBytes is this G's GC assist credit in terms of
+@@ -400,6 +403,14 @@ type g struct {
+ 	gcAssistBytes int64
+ }
+ 
++func SetGParam(gp unsafe.Pointer, param unsafe.Pointer) {
++	((*g)(gp)).new_param = param
++}
++
++func GetGParam(gp unsafe.Pointer) unsafe.Pointer {
++	return ((*g)(gp)).new_param
++}
++
+ type m struct {
+ 	g0      *g     // goroutine with scheduling stack
+ 	morebuf gobuf  // gobuf arg to morestack
+diff --git a/src/runtime/sizeof_test.go b/src/runtime/sizeof_test.go
+index 830055e2aa..83aec6e180 100644
+--- a/src/runtime/sizeof_test.go
++++ b/src/runtime/sizeof_test.go
+@@ -23,7 +23,7 @@ func TestSizeof(t *testing.T) {
+ 		_32bit uintptr     // size on 32bit platforms
+ 		_64bit uintptr     // size on 64bit platforms
+ 	}{
+-		{runtime.G{}, 216, 376}, // g, but exported for testing
++		{runtime.G{}, 228, 392}, // g, but exported for testing
+ 	}
+ 
+ 	for _, tt := range tests {
+diff --git a/src/runtime/stack.go b/src/runtime/stack.go
+index c7bfc0434b..e288ea5789 100644
+--- a/src/runtime/stack.go
++++ b/src/runtime/stack.go
+@@ -583,13 +583,13 @@ func adjustpointers(scanp unsafe.Pointer, bv *bitvector, adjinfo *adjustinfo, f
+ 			pp := (*uintptr)(add(scanp, (i+j)*sys.PtrSize))
+ 		retry:
+ 			p := *pp
+-			if f.valid() && 0 < p && p < minLegalPointer && debug.invalidptr != 0 {
+-				// Looks like a junk value in a pointer slot.
+-				// Live analysis wrong?
+-				getg().m.traceback = 2
+-				print("runtime: bad pointer in frame ", funcname(f), " at ", pp, ": ", hex(p), "\n")
+-				throw("invalid pointer found on stack")
+-			}
++			//if f.valid() && 0 < p && p < minLegalPointer && debug.invalidptr != 0 {
++			//	// Looks like a junk value in a pointer slot.
++			//	// Live analysis wrong?
++			//	getg().m.traceback = 2
++			//	print("runtime: bad pointer in frame ", funcname(f), " at ", pp, ": ", hex(p), "\n")
++			//	throw("invalid pointer found on stack")
++			//}
+ 			if minp <= p && p < maxp {
+ 				if stackDebug >= 3 {
+ 					print("adjust ptr ", hex(p), " ", funcname(f), "\n")
+diff --git a/src/runtime/stubs.go b/src/runtime/stubs.go
+index 74b385d596..1491d52fde 100644
+--- a/src/runtime/stubs.go
++++ b/src/runtime/stubs.go
+@@ -17,6 +17,10 @@ func add(p unsafe.Pointer, x uintptr) unsafe.Pointer {
+ // that fetch the g directly (from TLS or from the dedicated register).
+ func getg() *g
+ 
++func GetGoroutine() unsafe.Pointer {
++	return (unsafe.Pointer)(getg())
++}
++
+ // mcall switches from the g to the g0 stack and invokes fn(g),
+ // where g is the goroutine that made the call.
+ // mcall saves g's current PC/SP in g->sched so that it can be restored later.

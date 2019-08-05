@@ -274,6 +274,35 @@ func goschedguarded() {
 	mcall(goschedguarded_m)
 }
 
+func ParkUnsafe(gp unsafe.Pointer) {
+	g := (*g)(gp)
+	if g.new_unparkState == 2 {
+		g.new_unparkState = 0
+		return
+	}
+	gopark(parkUnsafeFastPath, nil, waitReasonZero, traceEvNone, 3)
+}
+
+func parkUnsafeFastPath(gp *g, lock unsafe.Pointer) bool {
+	if atomic.Cas(&gp.new_unparkState, 0, 1) {
+		return true
+	} else {
+		gp.new_unparkState = 0
+		return false
+	}
+}
+
+func UnparkUnsafe(gp unsafe.Pointer) {
+	g := (*g)(gp)
+	if g.new_unparkState == 0 {
+		if atomic.Cas(&g.new_unparkState, 0, 2) {
+			return // unparked
+		}
+	}
+	g.new_unparkState = 0
+	goready(g, 3)
+}
+
 // Puts the current goroutine into a waiting state and calls unlockf.
 // If unlockf returns false, the goroutine is resumed.
 // unlockf must not access this G's stack, as it may be moved between

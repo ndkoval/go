@@ -388,6 +388,9 @@ type g struct {
 	timer          *timer         // cached timer for time.Sleep
 	selectDone     uint32         // are we participating in a select and did someone win the race?
 
+	new_param       unsafe.Pointer // TODO use param instead
+	new_unparkState uint32         // 0 -- undefined, 1 -- parked, 2 -- unparked
+
 	// Per-G GC state
 
 	// gcAssistBytes is this G's GC assist credit in terms of
@@ -398,6 +401,14 @@ type g struct {
 	// and check for debt in the malloc hot path. The assist ratio
 	// determines how this corresponds to scan work debt.
 	gcAssistBytes int64
+}
+
+func SetGParam(gp unsafe.Pointer, param unsafe.Pointer) {
+	((*g)(gp)).new_param = param
+}
+
+func GetGParam(gp unsafe.Pointer) unsafe.Pointer {
+	return ((*g)(gp)).new_param
 }
 
 type m struct {
